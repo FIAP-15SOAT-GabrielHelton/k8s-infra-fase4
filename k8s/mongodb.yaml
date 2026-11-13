@@ -1,0 +1,52 @@
+# Banco NoSQL do Execution Service (só ele acessa).
+# shortcut: réplica única, sem volume persistente e sem autenticação (ClusterIP, alcançável
+# apenas de dentro do cluster) — trocar por StatefulSet com PVC e usuário/senha (ou DocumentDB)
+# se o ambiente deixar de ser efêmero.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  namespace: default
+  labels:
+    app: mongodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: mongodb
+          image: mongo:8
+          ports:
+            - containerPort: 27017
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: default
+spec:
+  type: ClusterIP
+  ports:
+    - port: 27017
+      targetPort: 27017
+  selector:
+    app: mongodb

@@ -1,0 +1,60 @@
+# Broker da Saga (exchange oficina.events), compartilhado pelos três serviços.
+# shortcut: réplica única e sem volume persistente — as filas se perdem se o pod reiniciar;
+# trocar por StatefulSet com PVC (ou Amazon MQ) se o ambiente deixar de ser efêmero.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: default
+  labels:
+    app: rabbitmq
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4-management
+          ports:
+            - containerPort: 5672
+          env:
+            # O usuário padrão "guest" só aceita conexões de localhost.
+            - name: RABBITMQ_DEFAULT_USER
+              value: oficina
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: password
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            tcpSocket:
+              port: 5672
+            initialDelaySeconds: 15
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: default
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5672
+      targetPort: 5672
+  selector:
+    app: rabbitmq
