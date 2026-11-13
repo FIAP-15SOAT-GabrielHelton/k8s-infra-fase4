@@ -1,22 +1,26 @@
-# k8s-infra
+# k8s-infra-fase4
 
-Infraestrutura Kubernetes (Terraform) do projeto **Oficina Mecânica** — Fase 3 do Tech Challenge FIAP.
+Infraestrutura Kubernetes (Terraform) do projeto **Oficina Mecânica** — Fase 4 do Tech Challenge FIAP.
 
-Provisiona a rede e o cluster onde a aplicação principal (repositório [`api`](https://github.com/FIAP-15SOAT-GabrielHelton/api)) é implantada:
+Provisiona a rede, o cluster e os componentes compartilhados onde os três microsserviços são implantados:
 
 - VPC (`10.0.0.0/16`) com 2 subnets públicas (`us-east-1a`/`us-east-1b`), Internet Gateway e route table.
 - Cluster EKS (`oficina-mecanica-cluster`) e node group (via `LabRole`, compatível com AWS Academy).
-- `metrics-server` (Helm) para habilitar o HPA da aplicação.
+- `metrics-server` (Helm) para habilitar o HPA dos serviços.
+- **RabbitMQ**, o broker de mensageria da Saga, e **MongoDB**, o banco NoSQL do `execution-service` (manifests em [`k8s/`](k8s/)).
+- Integração do cluster com o New Relic, dashboard e alertas.
 
-Este repositório faz parte de um conjunto de 5 (a arquitetura completa está descrita na [RFC-001](https://github.com/FIAP-15SOAT-GabrielHelton/api/blob/main/docs/fase3/RFC-001-authentication-authorization-serverless.md) do repo `api`):
+A visão geral da Fase 4 — arquitetura, Saga e os sete repositórios — está no README do [`os-service`](https://github.com/FIAP-15SOAT-GabrielHelton/os-service#arquitetura) e na [RFC-005](https://github.com/FIAP-15SOAT-GabrielHelton/os-service/blob/main/docs/fase4/RFC-005-microsservicos-e-saga.md).
 
 | Repositório | Responsabilidade |
 | :--- | :--- |
-| `k8s-infra` (este repo) | VPC + EKS + node group |
-| [`db-infra`](https://github.com/FIAP-15SOAT-GabrielHelton/db-infra) | RDS PostgreSQL |
-| [`api`](https://github.com/FIAP-15SOAT-GabrielHelton/api) | Aplicação Rails + ECR + deploy no cluster |
-| [`auth-serverless`](https://github.com/FIAP-15SOAT-GabrielHelton/auth-serverless) | API Gateway + Lambdas de autenticação/RBAC |
-| [`deploy-orchestrator`](https://github.com/FIAP-15SOAT-GabrielHelton/deploy-orchestrator) | Dispara e aguarda o deploy dos 4 repos acima, em ordem |
+| [`os-service`](https://github.com/FIAP-15SOAT-GabrielHelton/os-service) | Microsserviço de Ordens de Serviço (cadastros, estoque e ciclo de vida da OS) — PostgreSQL |
+| [`billing-service`](https://github.com/FIAP-15SOAT-GabrielHelton/billing-service) | Microsserviço de orçamento e pagamento (Mercado Pago) — PostgreSQL |
+| [`execution-service`](https://github.com/FIAP-15SOAT-GabrielHelton/execution-service) | Microsserviço de fila e andamento da execução — MongoDB |
+| `k8s-infra-fase4` (este repo) | VPC, EKS, RabbitMQ, MongoDB e New Relic |
+| [`db-infra-fase4`](https://github.com/FIAP-15SOAT-GabrielHelton/db-infra-fase4) | RDS PostgreSQL, com usuário e bancos isolados por serviço |
+| [`auth-serverless-fase4`](https://github.com/FIAP-15SOAT-GabrielHelton/auth-serverless-fase4) | API Gateway e Lambdas de autenticação/RBAC |
+| [`deploy-orchestrator-fase4`](https://github.com/FIAP-15SOAT-GabrielHelton/deploy-orchestrator-fase4) | Deploy e destroy de todos os repositórios, em sequência |
 
 ## Tecnologias utilizadas
 
@@ -25,6 +29,7 @@ Este repositório faz parte de um conjunto de 5 (a arquitetura completa está de
 | IaC | Terraform (`hashicorp/aws` ~> 5.0, `hashicorp/kubernetes` ~> 2.0, `hashicorp/helm` ~> 2.0) |
 | Nuvem | AWS (VPC, EKS, IAM `LabRole` do AWS Academy) |
 | Add-on de cluster | `metrics-server` (via provider Helm) |
+| Mensageria e NoSQL | RabbitMQ 4 e MongoDB 8, como Deployments no cluster |
 | CI/CD | GitHub Actions (`pull_request` para validação, `workflow_dispatch` para deploy/destroy) |
 | Backend do state | S3 (bucket compartilhado com os demais repositórios, key própria) |
 
@@ -49,6 +54,8 @@ flowchart TB
     end
 
     MS["metrics-server\n(Helm)"]
+    MQ["RabbitMQ\n(broker da Saga)"]
+    MG[("MongoDB\n(execution-service)")]
     SSM[("AWS SSM\nParameter Store")]
 
     Internet --> IGW --> SubA
@@ -56,6 +63,8 @@ flowchart TB
     NodeA --- EKS
     NodeB --- EKS
     MS --- EKS
+    MQ --- EKS
+    MG --- EKS
     EKS -. publica vpc_id/subnet_ids/eks_cluster_name .-> SSM
 
     classDef net fill:#9bb8ff,stroke:#5470c6,color:#000
@@ -63,13 +72,15 @@ flowchart TB
     classDef db fill:#a8e6a2,stroke:#2d8a1f,color:#000
 
     class IGW,NodeA,NodeB,EKS net
-    class MS,Internet ext
-    class SSM db
+    class MS,MQ,Internet ext
+    class SSM,MG db
 ```
 
 - **VPC** (`infra/vpc.tf`): 2 subnets públicas (multi-AZ), Internet Gateway e route table — simplificada de propósito (sem NAT Gateway) para reduzir custo/complexidade no AWS Academy.
-- **EKS** (`infra/eks.tf`, `infra/node_group.tf`): cluster gerenciado + node group de 1 a 3 instâncias `t3.medium`, usando a `LabRole` já disponível na conta AWS Academy (não é possível criar IAM roles próprias nesse ambiente).
-- **metrics-server** (`infra/metrics_server.tf`): pré-requisito para o HPA da aplicação (`api`) conseguir ler métricas de CPU/memória dos pods.
+- **EKS** (`infra/eks.tf`, `infra/node_group.tf`): cluster gerenciado + node group de 1 a 3 instâncias `t3.medium` (2 por padrão), usando a `LabRole` já disponível na conta AWS Academy (não é possível criar IAM roles próprias nesse ambiente).
+- **metrics-server** (`infra/metrics_server.tf`): pré-requisito para o HPA dos serviços conseguir ler métricas de CPU/memória dos pods.
+- **RabbitMQ** (`k8s/rabbitmq.yaml`): broker da Saga coreografada. Os três serviços publicam e consomem eventos no exchange `oficina.events`. Acessível só de dentro do cluster (`ClusterIP`), com usuário e senha próprios.
+- **MongoDB** (`k8s/mongodb.yaml`): banco do `execution-service`, também acessível só de dentro do cluster.
 
 ## Parâmetros publicados (AWS SSM Parameter Store)
 
@@ -77,9 +88,9 @@ Após o `terraform apply`, este repositório publica os seguintes parâmetros pa
 
 | Parâmetro | Valor | Consumido por |
 | :--- | :--- | :--- |
-| `/oficina-mecanica/vpc_id` | ID da VPC | `db-infra` |
-| `/oficina-mecanica/subnet_ids` | IDs das subnets públicas, separados por vírgula | `db-infra` |
-| `/oficina-mecanica/eks_cluster_name` | Nome do cluster EKS | `api` |
+| `/oficina-mecanica/vpc_id` | ID da VPC | `db-infra-fase4` |
+| `/oficina-mecanica/subnet_ids` | IDs das subnets públicas, separados por vírgula | `db-infra-fase4` |
+| `/oficina-mecanica/eks_cluster_name` | Nome do cluster EKS | `db-infra-fase4` e os três microsserviços |
 
 ## Execução local
 
@@ -105,7 +116,7 @@ terraform plan
 
 ## CI
 
-Workflow `CI (Terraform Validate)` (`.github/workflows/ci.yml`), disparado em toda Pull Request contra `main` que toque em `infra/**` — é o status check exigido pela proteção da branch `main` antes do merge. Como não há credenciais AWS disponíveis automaticamente em PR (só existem via input manual no `workflow_dispatch` de deploy), a validação é limitada ao que não depende de nuvem real:
+Workflow `CI (Terraform Validate)` (`.github/workflows/ci.yml`), disparado em toda Pull Request contra `main` — é o status check (`Terraform fmt & validate`) exigido pela proteção da branch `main` antes do merge. Como não há credenciais AWS disponíveis automaticamente em PR (só existem via input manual no `workflow_dispatch` de deploy), a validação é limitada ao que não depende de nuvem real:
 
 1. **Terraform Format Check** (`terraform fmt -check -recursive`) — garante que todo `.tf` está formatado no padrão canônico.
 2. **Terraform Init sem backend** (`terraform init -backend=false`) — baixa os providers só para permitir a validação sintática, sem tentar acessar o bucket S3 remoto.
@@ -119,26 +130,33 @@ Workflow `CD Deploy (VPC & EKS)` (`.github/workflows/cd_deploy.yml`, `workflow_d
 
 1. **Mask Sensitive Credentials** — mascara as credenciais AWS e as chaves do New Relic no log do Actions (`::add-mask::`).
 2. **Configure AWS Credentials** — autentica a sessão via `aws-actions/configure-aws-credentials`.
-3. **Bootstrap S3 Backend** — cria (se ainda não existir) o bucket S3 compartilhado de state do Terraform entre os 4 repositórios (`oficina-mecanica-tfstate-<account-id>`), resolvendo o problema de o `terraform init` precisar de um backend que ainda não existe na primeira execução.
-4. **Terraform Provisioning** — `terraform init` (contra o backend recém-garantido) + `terraform apply -auto-approve`, provisionando VPC, cluster EKS, node group (com autoscaling), `metrics-server`, a integração New Relic Kubernetes e o dashboard/alertas do New Relic, publicando `vpc_id`/`subnet_ids`/`eks_cluster_name` no SSM Parameter Store para `db-infra` e `api` consumirem.
+3. **Bootstrap S3 Backend** — cria (se ainda não existir) o bucket S3 compartilhado de state do Terraform entre os repositórios (`oficina-mecanica-tfstate-<account-id>`), resolvendo o problema de o `terraform init` precisar de um backend que ainda não existe na primeira execução.
+4. **Terraform Provisioning** — `terraform init` (contra o backend recém-garantido) + `terraform apply -auto-approve`, provisionando VPC, cluster EKS, node group (com autoscaling), `metrics-server`, a integração New Relic Kubernetes e o dashboard/alertas do New Relic, publicando `vpc_id`/`subnet_ids`/`eks_cluster_name` no SSM Parameter Store para os demais repositórios consumirem.
+5. **Deploy RabbitMQ & MongoDB** — cria o Secret com a senha do RabbitMQ, aplica os manifests de `k8s/` e espera os dois ficarem prontos.
 
-**Ordem de deploy do projeto**: `k8s-infra` → `db-infra` → `api` → `auth-serverless` (ou use o [`deploy-orchestrator`](https://github.com/FIAP-15SOAT-GabrielHelton/deploy-orchestrator) para disparar tudo de uma vez).
+**Ordem de deploy do projeto**: `k8s-infra-fase4` → `db-infra-fase4` → `os-service` → `billing-service` → `execution-service` → `auth-serverless-fase4` (ou use o [`deploy-orchestrator`](https://github.com/FIAP-15SOAT-GabrielHelton/deploy-orchestrator-fase4) para disparar tudo de uma vez).
 
 ## Observabilidade
 
 Este repositório provisiona a camada de monitoramento de infraestrutura e o controle central do New Relic:
 
 - **New Relic Infrastructure** (`nri-kubernetes`, Helm chart `newrelic/nri-bundle`) — coleta CPU/memória do cluster EKS (nodes e pods).
-- **Dashboard e policy de alertas** (provider Terraform `newrelic`) — dashboard com volume diário de OS, tempo médio de execução por etapa e erros/falhas de integração; alertas por e-mail para latência elevada, falhas no processamento de OS/orçamentos e indisponibilidade do healthcheck. Consulta dados enviados por `api` e `auth-serverless`, mas fica centralizado aqui por ser a infraestrutura observacional do projeto.
+- **Dashboard e policy de alertas** (provider Terraform `newrelic`) — dashboard com volume diário de OS, tempo médio de execução por etapa e erros/falhas de integração; alertas por e-mail para latência elevada, falhas no processamento de OS/orçamentos e indisponibilidade do healthcheck. Consulta dados enviados pelos três microsserviços e pelo `auth-serverless-fase4`, mas fica centralizado aqui por ser a infraestrutura observacional do projeto.
 
-Secrets/variáveis do repositório: `NEW_RELIC_LICENSE_KEY`, `NEW_RELIC_ACCOUNT_ID`, `NEW_RELIC_API_KEY` (secrets) e `NEW_RELIC_REGION`, `NEW_RELIC_ALERT_EMAIL` (variables, não sensíveis).
+O rastreamento distribuído entre os serviços (inclusive pelos eventos do RabbitMQ) é feito pelo agente APM de cada microsserviço.
 
-Detalhes de arquitetura: [`docs/fase3/architecture/component-diagram.md`](https://github.com/FIAP-15SOAT-GabrielHelton/api/blob/main/docs/fase3/architecture/component-diagram.md#4-monitoramento) e [ADR 11](https://github.com/FIAP-15SOAT-GabrielHelton/api/blob/main/docs/fase3/architecture/adr-log.md#adr-11-new-relic-como-ferramenta-de-observabilidade-e-monitoramento) (repositório `api`).
+Secrets/variáveis do repositório: `RABBITMQ_PASSWORD`, `NEW_RELIC_LICENSE_KEY`, `NEW_RELIC_ACCOUNT_ID`, `NEW_RELIC_API_KEY` (secrets) e `NEW_RELIC_REGION`, `NEW_RELIC_ALERT_EMAIL` (variables, não sensíveis).
+
+Decisões herdadas da Fase 3: [`docs/fase3/architecture/component-diagram.md`](https://github.com/FIAP-15SOAT-GabrielHelton/os-service/blob/main/docs/fase3/architecture/component-diagram.md#4-monitoramento) e [ADR 11](https://github.com/FIAP-15SOAT-GabrielHelton/os-service/blob/main/docs/fase3/architecture/adr-log.md#adr-11-new-relic-como-ferramenta-de-observabilidade-e-monitoramento) (repositório `os-service`).
 
 ## Destroy
 
-Workflow `CD Destroy (VPC & EKS)`. **Deve rodar por último** (depois de `db-infra` e `api`), pois eles dependem dos parâmetros SSM publicados aqui.
+Workflow `CD Destroy (VPC & EKS)`. **Deve rodar por último** (depois dos microsserviços e do `db-infra-fase4`), pois eles dependem do cluster e dos parâmetros SSM publicados aqui.
+
+## Limitações conhecidas
+
+- RabbitMQ e MongoDB rodam sem volume persistente, e o MongoDB sem autenticação (acessível só de dentro do cluster). Serve ao ambiente efêmero da AWS Academy; fora dele, o caminho é StatefulSet com volume, ou serviços gerenciados (Amazon MQ, DocumentDB).
 
 ## Documentação da API
 
-Este repositório não expõe nenhuma API HTTP — é infraestrutura pura. A documentação da API do projeto (Swagger/OpenAPI) vive no repositório [`api`](https://github.com/FIAP-15SOAT-GabrielHelton/api#documenta%C3%A7%C3%A3o-da-api).
+Este repositório não expõe nenhuma API HTTP — é infraestrutura pura. A documentação das APIs (Swagger/OpenAPI) vive em cada microsserviço: [`os-service`](https://github.com/FIAP-15SOAT-GabrielHelton/os-service#documentação-da-api), [`billing-service`](https://github.com/FIAP-15SOAT-GabrielHelton/billing-service#documentação-da-api) e [`execution-service`](https://github.com/FIAP-15SOAT-GabrielHelton/execution-service#documentação-da-api).
