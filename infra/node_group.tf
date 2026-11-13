@@ -8,7 +8,9 @@ resource "aws_eks_node_group" "main" {
   ]
 
   scaling_config {
-    desired_size = 1
+    # 2 nós: um t3.medium comporta 17 pods, e a Fase 4 sobe três serviços (web + consumer),
+    # RabbitMQ, MongoDB e os agentes do New Relic.
+    desired_size = 2
     max_size     = 3
     min_size     = 1
   }

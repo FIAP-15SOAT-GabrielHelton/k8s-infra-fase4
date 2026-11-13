@@ -88,3 +88,20 @@ jobs:
             -backend-config="region=us-east-1"
 
           terraform apply -auto-approve
+
+      # RabbitMQ (mensageria da Saga) e MongoDB (banco do Execution Service) rodam dentro do
+      # cluster. A senha do broker vem do secret RABBITMQ_PASSWORD, o mesmo valor que os
+      # três serviços usam para montar a RABBITMQ_URL.
+      - name: Deploy RabbitMQ & MongoDB
+        env:
+          RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+        run: |
+          CLUSTER_NAME=$(terraform -chdir=infra output -raw eks_cluster_name)
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region us-east-1
+
+          kubectl create secret generic rabbitmq-credentials \
+            --from-literal=password="$RABBITMQ_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl apply -f k8s/rabbitmq.yaml -f k8s/mongodb.yaml
+          kubectl rollout status deployment/rabbitmq deployment/mongodb --timeout=300s
